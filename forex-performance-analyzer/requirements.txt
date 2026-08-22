@@ -1,0 +1,10 @@
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+plotly>=5.22
+lxml>=5.2
+
+# Opcional: só instala e funciona em Windows, com o terminal MetaTrader 5
+# instalado. Se estiver em Mac/Linux, comente a linha abaixo e use a
+# importação de arquivo (CSV/HTML) no lugar da conexão direta.
+MetaTrader5>=5.0.45; sys_platform == "win32"

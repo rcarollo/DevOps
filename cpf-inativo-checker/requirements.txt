@@ -1,0 +1,13 @@
+pandas>=2.2
+openpyxl>=3.1
+requests>=2.31
+sqlalchemy>=2.0
+
+# Instale só o driver do seu banco (se for ler direto do banco com --sql):
+# psycopg2-binary>=2.9   # PostgreSQL
+# pymysql>=1.1           # MySQL / MariaDB
+# pyodbc>=5.0            # SQL Server
+# oracledb>=2.0          # Oracle
+
+# Testes
+pytest>=8.0

@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.pytest_cache/
+# Contêm dados pessoais (LGPD) — nunca versionar
+.cache_cpf.sqlite
+resultado_cpfs*.xlsx
+resultado_cpfs*.csv
+*.sqlite

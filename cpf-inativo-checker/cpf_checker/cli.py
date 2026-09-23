@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--sep", help="Separador do CSV (padrão: detecta automaticamente)")
     p.add_argument("--saida", default="resultado_cpfs.xlsx",
                    help="Arquivo de saída .xlsx ou .csv (padrão: resultado_cpfs.xlsx)")
+    p.add_argument("--gravar-tabela", metavar="TABELA",
+                   help="Também grava a situação de cada CPF nesta tabela do banco (--db-url/DB_URL)")
     p.add_argument("--somente-inativos", action="store_true",
                    help="Grava só os CPFs inativos/indeterminados no arquivo principal")
 
@@ -96,6 +98,9 @@ def main(argv: list[str] | None = None) -> int:
                 log.error("Informe --db-url ou a variável de ambiente DB_URL para usar --sql.")
                 return 2
             df = sources.ler_sql(args.db_url, args.sql)
+        if args.gravar_tabela and not args.db_url:
+            log.error("--gravar-tabela precisa de --db-url ou da variável DB_URL.")
+            return 2
         coluna = sources.detectar_coluna_cpf(df, args.coluna_cpf)
         provider = _provider(args)
     except (ValueError, FileNotFoundError, ProviderError) as exc:
@@ -124,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
 
     destino = Path(args.saida)
     _salvar(resultado, destino, args.somente_inativos)
+    if args.gravar_tabela:
+        n = sources.gravar_situacoes(args.db_url, args.gravar_tabela, resultado)
+        log.info("%d CPFs gravados na tabela %s", n, args.gravar_tabela)
 
     r = resumo(resultado)
     print(

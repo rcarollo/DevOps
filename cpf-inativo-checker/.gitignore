@@ -9,3 +9,5 @@ venv/
 resultado_cpfs*.xlsx
 resultado_cpfs*.csv
 *.sqlite
+relatorios/
+logs/

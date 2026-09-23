@@ -83,6 +83,7 @@ python -m cpf_checker --arquivo clientes.xlsx --limite 20
 | `--limite N` | Consulta no máximo N CPFs nesta execução |
 | `--workers N` / `--por-segundo N` | Paralelismo e teto de requisições por segundo (padrão 4 / 5) |
 | `--validade-cache DIAS` | Quanto tempo reaproveitar um resultado já consultado (padrão 30) |
+| `--gravar-tabela TABELA` | Grava a situação de cada CPF numa tabela do banco (ver Automação) |
 | `--sem-cache` | Força consultar tudo de novo |
 | `--trial` | Ambiente de demonstração do SERPRO (sem custo, só CPFs de teste da documentação) |
 | `--provedor fake` | Roda o fluxo inteiro sem rede (tudo "Regular"), para testar leitura/relatório |
@@ -99,6 +100,119 @@ Colunas adicionadas: `cpf_formatado`, `status_consulta` (`ok`,
 `nao_encontrado`, `cpf_invalido`, `cpf_vazio`, `erro`, `nao_consultado`),
 `situacao_codigo`, `situacao_receita`, `nome_receita`, `ano_obito`,
 `inativo` (`SIM` / `NAO` / `indeterminado`), `erro`, `fonte`.
+
+## Automação: integrar com o sistema
+
+Há duas formas, e elas podem ser usadas juntas:
+
+| | **A. Consulta na hora (API)** | **B. Rotina agendada (tabela no banco)** |
+|---|---|---|
+| Como funciona | O sistema chama um endereço HTTP ao abrir, cadastrar ou aprovar o cliente | Toda noite, ou toda semana, a base inteira é verificada e o resultado vai para uma tabela |
+| Quando usar | Cadastro de cliente novo, aprovação de venda/crédito | Tela de consulta, relatórios, bloqueio automático no ERP |
+| Precisa mexer no sistema? | Sim: uma chamada HTTP | Só uma consulta (JOIN) na tabela `cpf_situacao` |
+
+Nas duas, o cache evita pagar de novo por um CPF consultado nos últimos
+30 dias (ajustável com `--validade-cache`).
+
+### A. Serviço HTTP para consulta na hora
+
+```bash
+export CPF_API_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m cpf_checker.server --host 0.0.0.0 --porta 8080
+```
+
+O sistema faz:
+
+```bash
+curl -H "X-API-Key: $CPF_API_KEY" http://servidor:8080/cpf/529.982.247-25
+```
+
+```json
+{"cpf": "52998224725", "status": "ok", "situacao_codigo": "2",
+ "situacao_descricao": "Suspensa", "inativo": true, "nome": "...", "ano_obito": "", ...}
+```
+
+| Rota | Retorno |
+|------|---------|
+| `GET /cpf/{cpf}` | 200 com a situação; 422 se o CPF for inválido; 502 se o SERPRO recusar a credencial |
+| `GET /cpf/{cpf}?forcar=1` | Ignora o cache e consulta a Receita de novo |
+| `POST /cpfs` com `{"cpfs": [...]}` | Lista de resultados, até 100 CPFs por chamada |
+| `GET /saude` | Monitoramento, sem chave |
+
+No sistema, a regra fica: se `inativo` for `true`, bloquear ou alertar; se
+for `null` (erro temporário), deixar seguir e verificar depois.
+
+**Segurança:** a resposta contém dados pessoais. Rode o serviço só na rede
+interna ou atrás do proxy HTTPS da empresa, nunca exposto na internet, e
+guarde a `CPF_API_KEY` como segredo.
+
+**Deixar rodando como serviço:**
+
+- *Linux (systemd)*: `/etc/systemd/system/cpf-checker.service`
+  ```ini
+  [Unit]
+  Description=Consulta situação de CPF
+  After=network.target
+
+  [Service]
+  WorkingDirectory=/opt/cpf-inativo-checker
+  EnvironmentFile=/opt/cpf-inativo-checker/.env
+  ExecStart=/opt/cpf-inativo-checker/.venv/bin/python -m cpf_checker.server --host 0.0.0.0 --porta 8080
+  Restart=always
+  User=cpfchecker
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+  `sudo systemctl enable --now cpf-checker`
+- *Windows*: use o [NSSM](https://nssm.cc/) para registrar
+  `C:\cpf-inativo-checker\.venv\Scripts\python.exe -m cpf_checker.server --host 0.0.0.0 --porta 8080`
+  como serviço, com as variáveis `SERPRO_*` e `CPF_API_KEY` em *Environment*.
+
+### B. Rotina agendada que grava no banco
+
+```bash
+python -m cpf_checker \
+  --sql "SELECT id, nome, cpf FROM clientes WHERE tipo_pessoa = 'F'" \
+  --gravar-tabela cpf_situacao \
+  --saida relatorios/cpfs_$(date +%F).xlsx
+```
+
+Isso cria (ou atualiza) a tabela `cpf_situacao` no mesmo banco, com uma linha
+por CPF: `cpf` (só dígitos), `status_consulta`, `situacao_codigo`,
+`situacao_receita`, `inativo` (`SIM`/`NAO`), `ano_obito` e `atualizado_em`.
+Para usar no sistema, basta um JOIN, por exemplo numa view:
+
+```sql
+CREATE VIEW vw_clientes_cpf AS
+SELECT c.*, s.situacao_receita, s.inativo, s.atualizado_em
+FROM clientes c
+LEFT JOIN cpf_situacao s
+  ON s.cpf = LPAD(REGEXP_REPLACE(c.cpf, '[^0-9]', '', 'g'), 11, '0');  -- PostgreSQL
+```
+
+(No SQL Server/MySQL, ajuste a limpeza do CPF, ou compare direto se o
+sistema já grava só os dígitos.)
+
+O usuário do banco usado em `DB_URL` precisa ter permissão de criar e gravar
+a tabela `cpf_situacao`.
+
+**Agendar:**
+
+- *Linux (cron)*, toda segunda às 2h: `crontab -e`
+  ```
+  0 2 * * 1  cd /opt/cpf-inativo-checker && set -a && . ./.env && set +a && .venv/bin/python -m cpf_checker --sql "SELECT id, cpf FROM clientes WHERE tipo_pessoa='F'" --gravar-tabela cpf_situacao --saida relatorios/cpfs.xlsx >> logs/cpf.log 2>&1
+  ```
+- *Windows (Agendador de Tarefas)*: crie um `rodar_cpf.bat`
+  ```bat
+  cd /d C:\cpf-inativo-checker
+  .venv\Scripts\python.exe -m cpf_checker --sql "SELECT id, cpf FROM clientes WHERE tipo_pessoa='F'" --gravar-tabela cpf_situacao --saida relatorios\cpfs.xlsx >> logs\cpf.log 2>&1
+  ```
+  e agende com `schtasks /create /tn "Consulta CPF" /tr C:\cpf-inativo-checker\rodar_cpf.bat /sc weekly /d MON /st 02:00`
+  (as variáveis `SERPRO_*` e `DB_URL` devem estar definidas para o usuário da tarefa).
+
+Com o cache de 30 dias, uma rotina semanal só consulta de novo, e só paga
+por, os CPFs novos ou cujo resultado venceu.
 
 ## Economia de consultas
 

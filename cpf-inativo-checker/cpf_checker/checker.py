@@ -82,6 +82,25 @@ class RateLimiter:
             time.sleep(espera)
 
 
+def consultar_um(
+    valor: object, provider: Provider, cache: Cache | None = None, *, forcar: bool = False
+) -> Resultado:
+    """Consulta um único CPF: normaliza, valida, tenta o cache e só então a API.
+
+    ``forcar`` ignora o cache (mas grava o resultado novo nele).
+    ProviderError (credencial inválida etc.) é propagado para quem chamou.
+    """
+    c = cpf_utils.normalize(valor)
+    if not cpf_utils.is_valid(c):
+        return Resultado(c, "cpf_invalido", erro="dígito verificador inválido", fonte="validacao_local")
+    if cache and not forcar and (hit := cache.get(c)):
+        return hit
+    r = provider.consultar(c)
+    if cache:
+        cache.put(r)
+    return r
+
+
 def verificar(
     df: pd.DataFrame,
     coluna_cpf: str,

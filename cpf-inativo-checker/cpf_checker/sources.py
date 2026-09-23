@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -51,3 +53,45 @@ def detectar_coluna_cpf(df: pd.DataFrame, coluna: str | None = None) -> str:
             f"Não achei coluna de CPF. Use --coluna-cpf. Colunas: {list(df.columns)}"
         )
     return candidatas[0]
+
+
+def gravar_situacoes(url_conexao: str, tabela: str, df: pd.DataFrame) -> int:
+    """Grava/atualiza a situação de cada CPF numa tabela do banco (uma linha por CPF).
+
+    Cria a tabela se não existir. CPFs já presentes são substituídos; os demais
+    são preservados (útil ao processar a base em lotes com --limite).
+    Só grava resultados definitivos (consultados com sucesso ou não encontrados).
+    """
+    from sqlalchemy import bindparam, create_engine, inspect, text
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?", tabela):
+        raise ValueError(f"Nome de tabela inválido: {tabela!r}")
+    schema, _, nome = tabela.rpartition(".")
+    schema = schema or None
+
+    linhas = (
+        df[df["status_consulta"].isin(["ok", "nao_encontrado"])]
+        .drop_duplicates("cpf_normalizado")
+        [["cpf_normalizado", "status_consulta", "situacao_codigo", "situacao_receita", "inativo", "ano_obito"]]
+        .rename(columns={"cpf_normalizado": "cpf"})
+        .assign(atualizado_em=datetime.now(timezone.utc).replace(tzinfo=None))
+    )
+    if linhas.empty:
+        return 0
+
+    engine = create_engine(url_conexao)
+    try:
+        with engine.begin() as conn:
+            if not inspect(conn).has_table(nome, schema=schema):
+                linhas.head(0).to_sql(nome, conn, schema=schema, index=False)
+            alvo = f"{schema}.{nome}" if schema else nome
+            apagar = text(f"DELETE FROM {alvo} WHERE cpf IN :cpfs").bindparams(
+                bindparam("cpfs", expanding=True)
+            )
+            cpfs = linhas["cpf"].tolist()
+            for i in range(0, len(cpfs), 500):
+                conn.execute(apagar, {"cpfs": cpfs[i:i + 500]})
+            linhas.to_sql(nome, conn, schema=schema, index=False, if_exists="append", chunksize=500)
+    finally:
+        engine.dispose()
+    return len(linhas)
